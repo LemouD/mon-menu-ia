@@ -74,14 +74,20 @@ export default {
     });
 
     // Gemini (surtout le tier gratuit) renvoie parfois une erreur 503
-    // "surchargé" ou 429 "trop de requêtes", de façon ponctuelle : ça vaut
-    // le coup de réessayer automatiquement 2-3 fois avant d'abandonner,
-    // pour que la maman n'ait pas à recliquer elle-même sur le bouton.
+    // "surchargé"/429 "trop de requêtes", ou bien un nombre de jours
+    // différent de ce qui est demandé (l'IA n'est pas fiable à 100%
+    // malgré la consigne "EXACTEMENT N éléments") : dans les deux cas,
+    // ça vaut le coup de réessayer automatiquement avant d'abandonner,
+    // pour que la maman n'ait pas à recliquer elle-même sur le bouton,
+    // et surtout pour ne jamais renvoyer à Excel un menu incomplet qui
+    // ferait planter la suite (VBA suppose toujours 7 jours par semaine).
     const MAX_TENTATIVES_IA = 3;
-    let geminiResponse = null;
-    let derniereErreurReseau = null;
+    const nombreJoursAttendu = nbSemaines * 7;
+    let texteMenu = null;
+    let derniereRaisonEchec = "raison inconnue";
 
     for (let tentative = 1; tentative <= MAX_TENTATIVES_IA; tentative++) {
+      let geminiResponse = null;
       try {
         geminiResponse = await fetch(geminiUrl, {
           method: "POST",
@@ -89,57 +95,78 @@ export default {
           body: geminiBody,
         });
       } catch (e) {
-        derniereErreurReseau = e;
-        geminiResponse = null;
+        derniereRaisonEchec = "impossible de joindre l'IA (" + e.message + ")";
       }
 
-      const estSurcharge = geminiResponse && (geminiResponse.status === 503 || geminiResponse.status === 429);
-      const aEchoueReseau = !geminiResponse;
+      if (geminiResponse && !geminiResponse.ok) {
+        const estSurcharge = geminiResponse.status === 503 || geminiResponse.status === 429;
+        if (!estSurcharge) {
+          // erreur definitive (400, 404, cle invalide...) : inutile de reessayer
+          const detail = await geminiResponse.text();
+          return jsonResponse({ error: messageErreurGemini(geminiResponse.status, detail) }, 502);
+        }
+        derniereRaisonEchec = "l'IA est surchargée (code " + geminiResponse.status + ")";
+      } else if (geminiResponse) {
+        const geminiData = await geminiResponse.json();
+        const texte = extraireTexteGemini(geminiData);
 
-      if ((estSurcharge || aEchoueReseau) && tentative < MAX_TENTATIVES_IA) {
+        if (!texte) {
+          derniereRaisonEchec = "réponse de l'IA vide ou inattendue";
+        } else {
+          const nombreJoursObtenu = compterJours(texte);
+          if (nombreJoursObtenu === nombreJoursAttendu) {
+            texteMenu = texte;
+            break; // reponse valide, on s'arrete la
+          }
+          derniereRaisonEchec = "nombre de jours incorrect (" +
+            (nombreJoursObtenu === null ? "format inattendu" : nombreJoursObtenu + " au lieu de " + nombreJoursAttendu) + ")";
+        }
+      }
+
+      if (tentative < MAX_TENTATIVES_IA) {
         await attendre(tentative * 2500); // 2.5s, puis 5s avant la tentative suivante
-        continue;
       }
-      break; // succès, erreur definitive, ou dernier essai epuise
     }
 
-    if (!geminiResponse) {
+    if (!texteMenu) {
       return jsonResponse(
-        { error: "Impossible de joindre l'IA après plusieurs tentatives : " +
-          (derniereErreurReseau ? derniereErreurReseau.message : "raison inconnue") },
+        { error: "L'IA n'a pas réussi à générer un menu complet et valide après plusieurs tentatives (" +
+          derniereRaisonEchec + "). Réessaie dans quelques minutes." },
         502
       );
     }
 
-    if (!geminiResponse.ok) {
-      const detail = await geminiResponse.text();
-      return jsonResponse(
-        { error: messageErreurGemini(geminiResponse.status, detail) },
-        502
-      );
-    }
-
-    const geminiData = await geminiResponse.json();
-    const texte = geminiData &&
-      geminiData.candidates &&
-      geminiData.candidates[0] &&
-      geminiData.candidates[0].content &&
-      geminiData.candidates[0].content.parts &&
-      geminiData.candidates[0].content.parts[0] &&
-      geminiData.candidates[0].content.parts[0].text;
-
-    if (!texte) {
-      return jsonResponse({ error: "Réponse de l'IA vide ou inattendue." }, 502);
-    }
-
-    // texte est déjà le JSON du menu (grâce à responseSchema) : on le
+    // texteMenu est déjà le JSON du menu (grâce à responseSchema) : on le
     // renvoie tel quel à Excel, avec le bon Content-Type.
-    return new Response(texte, {
+    return new Response(texteMenu, {
       status: 200,
       headers: { "Content-Type": "application/json; charset=utf-8" },
     });
   },
 };
+
+function extraireTexteGemini(geminiData) {
+  return (
+    geminiData &&
+    geminiData.candidates &&
+    geminiData.candidates[0] &&
+    geminiData.candidates[0].content &&
+    geminiData.candidates[0].content.parts &&
+    geminiData.candidates[0].content.parts[0] &&
+    geminiData.candidates[0].content.parts[0].text
+  ) || null;
+}
+
+// Compte le nombre d'elements dans le tableau "jours" du JSON renvoye
+// par l'IA, sans faire planter le Worker si le JSON est malforme.
+function compterJours(texteJson) {
+  try {
+    const data = JSON.parse(texteJson);
+    return data && Array.isArray(data.jours) ? data.jours.length : null;
+  } catch (e) {
+    return null;
+  }
+}
 
 function jsonResponse(obj, status) {
   return new Response(JSON.stringify(obj), {
