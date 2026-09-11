@@ -63,12 +63,8 @@ export default {
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
               temperature: 0.9,
-              responseFormat: {
-                text: {
-                  mimeType: "application/json",
-                  schema: schema,
-                },
-              },
+              responseMimeType: "application/json",
+              responseSchema: schema,
             },
           }),
         }
@@ -143,26 +139,26 @@ strictement le format demandé.`;
 
 function construireSchema(nbSemaines) {
   const ingredientSchema = {
-    type: "object",
+    type: "OBJECT",
     properties: {
-      Nom: { type: "string" },
-      Quantite: { type: "number" },
-      Unite: { type: "string" },
+      Nom: { type: "STRING" },
+      Quantite: { type: "NUMBER" },
+      Unite: { type: "STRING" },
     },
     required: ["Nom", "Quantite", "Unite"],
   };
 
   const platSchema = {
-    type: "object",
+    type: "OBJECT",
     properties: {
-      Nom: { type: "string" },
-      Ingredients: { type: "array", items: ingredientSchema },
+      Nom: { type: "STRING" },
+      Ingredients: { type: "ARRAY", items: ingredientSchema },
     },
     required: ["Nom", "Ingredients"],
   };
 
   const jourSchema = {
-    type: "object",
+    type: "OBJECT",
     properties: {
       PetitDej: platSchema,
       Jus: platSchema,
@@ -173,14 +169,14 @@ function construireSchema(nbSemaines) {
   };
 
   return {
-    type: "object",
+    type: "OBJECT",
     properties: {
       semaines: {
-        type: "array",
+        type: "ARRAY",
         minItems: nbSemaines,
         maxItems: nbSemaines,
         items: {
-          type: "array",
+          type: "ARRAY",
           minItems: 7,
           maxItems: 7,
           items: jourSchema,
