@@ -1,0 +1,8 @@
+name = "mon-menu-ia"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+
+# Les secrets (GEMINI_API_KEY, APP_SHARED_SECRET) ne se mettent PAS ici :
+# on les ajoute depuis le tableau de bord Cloudflare, dans
+# Settings > Variables and Secrets, pour qu'ils ne se retrouvent jamais
+# dans ce dépôt.
