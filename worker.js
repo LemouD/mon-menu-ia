@@ -85,6 +85,7 @@ export default {
     const nombreJoursAttendu = nbSemaines * 7;
     let texteMenu = null;
     let derniereRaisonEchec = "raison inconnue";
+    let dernierStatutQuota = null; // 429 ou 503, pour le message final
 
     for (let tentative = 1; tentative <= MAX_TENTATIVES_IA; tentative++) {
       let geminiResponse = null;
@@ -98,14 +99,18 @@ export default {
         derniereRaisonEchec = "impossible de joindre l'IA (" + e.message + ")";
       }
 
+      let delaiAvantSuite = null; // ms suggéré par Google (429), sinon null
+
       if (geminiResponse && !geminiResponse.ok) {
         const estSurcharge = geminiResponse.status === 503 || geminiResponse.status === 429;
+        const detail = await geminiResponse.text();
         if (!estSurcharge) {
           // erreur definitive (400, 404, cle invalide...) : inutile de reessayer
-          const detail = await geminiResponse.text();
           return jsonResponse({ error: messageErreurGemini(geminiResponse.status, detail) }, 502);
         }
+        dernierStatutQuota = geminiResponse.status;
         derniereRaisonEchec = "l'IA est surchargée (code " + geminiResponse.status + ")";
+        delaiAvantSuite = extraireDelaiRetry(detail);
       } else if (geminiResponse) {
         const geminiData = await geminiResponse.json();
         const texte = extraireTexteGemini(geminiData);
@@ -124,16 +129,31 @@ export default {
       }
 
       if (tentative < MAX_TENTATIVES_IA) {
-        await attendre(tentative * 2500); // 2.5s, puis 5s avant la tentative suivante
+        // 429 "trop de requêtes" a besoin d'une pause bien plus longue que
+        // 503 "surchargé" pour avoir une chance de repartir (Google suggère
+        // parfois un délai précis dans sa réponse : on le respecte s'il y
+        // en a un). On reste sous la limite d'attente d'Excel (4 min).
+        let delai = delaiAvantSuite;
+        if (delai === null) {
+          delai = dernierStatutQuota === 429 ? tentative * 12000 : tentative * 3000;
+        }
+        await attendre(Math.min(delai, 45000));
       }
     }
 
     if (!texteMenu) {
-      return jsonResponse(
-        { error: "L'IA n'a pas réussi à générer un menu complet et valide après plusieurs tentatives (" +
-          derniereRaisonEchec + "). Réessaie dans quelques minutes." },
-        502
-      );
+      let messageFinal =
+        "L'IA n'a pas réussi à générer un menu complet et valide après plusieurs tentatives (" +
+        derniereRaisonEchec + ").";
+      if (dernierStatutQuota === 429) {
+        messageFinal +=
+          " Cela arrive quand le quota gratuit de l'IA (nombre de demandes autorisées par minute ou par jour) " +
+          "est atteint. Si ça persiste, attends quelques minutes (ou le lendemain si tu as beaucoup testé " +
+          "aujourd'hui), ou vérifie ton quota sur https://aistudio.google.com/rate-limit.";
+      } else {
+        messageFinal += " Réessaie dans quelques minutes.";
+      }
+      return jsonResponse({ error: messageFinal }, 502);
     }
 
     // texteMenu est déjà le JSON du menu (grâce à responseSchema) : on le
@@ -177,6 +197,32 @@ function jsonResponse(obj, status) {
 
 function attendre(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Google inclut parfois, dans le corps d'une erreur 429, un delai
+// d'attente conseille avant de reessayer (RetryInfo.retryDelay, ex.
+// "19s"). Quand c'est le cas on le respecte plutot que de deviner.
+// Renvoie null si le detail n'est pas exploitable (JSON invalide,
+// pas d'info de delai, etc.) - le code appelant retombe alors sur un
+// delai par defaut.
+function extraireDelaiRetry(detailBrut) {
+  try {
+    const data = JSON.parse(detailBrut);
+    const details = data && data.error && data.error.details;
+    if (!Array.isArray(details)) return null;
+
+    for (const d of details) {
+      if (d && typeof d.retryDelay === "string") {
+        const secondes = parseFloat(d.retryDelay.replace("s", ""));
+        if (!isNaN(secondes) && secondes > 0) {
+          return Math.round(secondes * 1000);
+        }
+      }
+    }
+  } catch (e) {
+    // corps non-JSON ou inattendu : on ignore, le delai par defaut sera utilise
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------
