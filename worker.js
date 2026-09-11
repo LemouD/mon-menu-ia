@@ -62,31 +62,59 @@ export default {
 
     const schema = construireSchema();
 
-    let geminiResponse;
-    try {
-      geminiResponse = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${env.GEMINI_API_KEY}`,
-        {
+    const geminiUrl =
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${env.GEMINI_API_KEY}`;
+    const geminiBody = JSON.stringify({
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.9,
+        responseMimeType: "application/json",
+        responseSchema: schema,
+      },
+    });
+
+    // Gemini (surtout le tier gratuit) renvoie parfois une erreur 503
+    // "surchargé" ou 429 "trop de requêtes", de façon ponctuelle : ça vaut
+    // le coup de réessayer automatiquement 2-3 fois avant d'abandonner,
+    // pour que la maman n'ait pas à recliquer elle-même sur le bouton.
+    const MAX_TENTATIVES_IA = 3;
+    let geminiResponse = null;
+    let derniereErreurReseau = null;
+
+    for (let tentative = 1; tentative <= MAX_TENTATIVES_IA; tentative++) {
+      try {
+        geminiResponse = await fetch(geminiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: 0.9,
-              responseMimeType: "application/json",
-              responseSchema: schema,
-            },
-          }),
-        }
+          body: geminiBody,
+        });
+      } catch (e) {
+        derniereErreurReseau = e;
+        geminiResponse = null;
+      }
+
+      const estSurcharge = geminiResponse && (geminiResponse.status === 503 || geminiResponse.status === 429);
+      const aEchoueReseau = !geminiResponse;
+
+      if ((estSurcharge || aEchoueReseau) && tentative < MAX_TENTATIVES_IA) {
+        await attendre(tentative * 2500); // 2.5s, puis 5s avant la tentative suivante
+        continue;
+      }
+      break; // succès, erreur definitive, ou dernier essai epuise
+    }
+
+    if (!geminiResponse) {
+      return jsonResponse(
+        { error: "Impossible de joindre l'IA après plusieurs tentatives : " +
+          (derniereErreurReseau ? derniereErreurReseau.message : "raison inconnue") },
+        502
       );
-    } catch (e) {
-      return jsonResponse({ error: "Impossible de joindre l'IA : " + e.message }, 502);
     }
 
     if (!geminiResponse.ok) {
       const detail = await geminiResponse.text();
       return jsonResponse(
-        { error: "L'IA a renvoyé une erreur (" + geminiResponse.status + ") : " + detail.slice(0, 500) },
+        { error: messageErreurGemini(geminiResponse.status, detail) },
         502
       );
     }
@@ -118,6 +146,38 @@ function jsonResponse(obj, status) {
     status: status || 200,
     headers: { "Content-Type": "application/json; charset=utf-8" },
   });
+}
+
+function attendre(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ---------------------------------------------------------------------
+//  Construit un message d'erreur clair et court (au lieu de renvoyer le
+//  JSON brut de Google, illisible pour une utilisatrice non technique).
+// ---------------------------------------------------------------------
+function messageErreurGemini(status, detailBrut) {
+  if (status === 503) {
+    return "Le service IA est actuellement très sollicité. On a réessayé plusieurs fois automatiquement " +
+      "sans succès : merci de réessayer dans quelques minutes.";
+  }
+  if (status === 429) {
+    return "Trop de demandes envoyées à l'IA en peu de temps. Merci de réessayer dans quelques minutes.";
+  }
+
+  // Pour les autres erreurs (400, 404...), on essaie d'extraire le message
+  // lisible de Google plutôt que de renvoyer tout le JSON brut.
+  try {
+    const data = JSON.parse(detailBrut);
+    const messageGoogle = data && data.error && data.error.message;
+    if (messageGoogle) {
+      return "L'IA a renvoyé une erreur (" + status + ") : " + messageGoogle;
+    }
+  } catch (e) {
+    // detailBrut n'était pas du JSON valide : on retombe sur le texte brut
+  }
+
+  return "L'IA a renvoyé une erreur (" + status + ") : " + String(detailBrut).slice(0, 300);
 }
 
 // ---------------------------------------------------------------------
