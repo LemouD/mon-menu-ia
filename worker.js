@@ -13,7 +13,7 @@
 //                          utilise ton serveur (secret)
 // =====================================================================
 
-const MODEL_NAME = "gemini-2.5-flash";
+const MODEL_NAME = "gemini-3.6-flash";
 // Si Google retire ce modèle du plan gratuit, regarde la liste à jour
 // sur https://aistudio.google.com/ et remplace la valeur ci-dessus.
 
@@ -63,8 +63,12 @@ export default {
             contents: [{ parts: [{ text: prompt }] }],
             generationConfig: {
               temperature: 0.9,
-              responseMimeType: "application/json",
-              responseSchema: schema,
+              responseFormat: {
+                text: {
+                  mimeType: "application/json",
+                  schema: schema,
+                },
+              },
             },
           }),
         }
@@ -139,26 +143,26 @@ strictement le format demandé.`;
 
 function construireSchema(nbSemaines) {
   const ingredientSchema = {
-    type: "OBJECT",
+    type: "object",
     properties: {
-      Nom: { type: "STRING" },
-      Quantite: { type: "NUMBER" },
-      Unite: { type: "STRING" },
+      Nom: { type: "string" },
+      Quantite: { type: "number" },
+      Unite: { type: "string" },
     },
     required: ["Nom", "Quantite", "Unite"],
   };
 
   const platSchema = {
-    type: "OBJECT",
+    type: "object",
     properties: {
-      Nom: { type: "STRING" },
-      Ingredients: { type: "ARRAY", items: ingredientSchema },
+      Nom: { type: "string" },
+      Ingredients: { type: "array", items: ingredientSchema },
     },
     required: ["Nom", "Ingredients"],
   };
 
   const jourSchema = {
-    type: "OBJECT",
+    type: "object",
     properties: {
       PetitDej: platSchema,
       Jus: platSchema,
@@ -169,14 +173,14 @@ function construireSchema(nbSemaines) {
   };
 
   return {
-    type: "OBJECT",
+    type: "object",
     properties: {
       semaines: {
-        type: "ARRAY",
+        type: "array",
         minItems: nbSemaines,
         maxItems: nbSemaines,
         items: {
-          type: "ARRAY",
+          type: "array",
           minItems: 7,
           maxItems: 7,
           items: jourSchema,
