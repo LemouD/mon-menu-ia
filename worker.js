@@ -11,6 +11,11 @@
 //    - APP_SHARED_SECRET: un mot de passe que toi seule choisis, pour
 //                          éviter que n'importe qui sur internet
 //                          utilise ton serveur (secret)
+//    - PEXELS_API_KEY   : ta clé gratuite de l'API Pexels (secret),
+//                          utilisée pour trouver une photo par plat sur
+//                          la feuille "Détail des menus". Facultatif :
+//                          si elle n'est pas configurée, les menus se
+//                          génèrent quand même, simplement sans photos.
 // =====================================================================
 
 const MODEL_NAME = "gemini-3.6-flash";
@@ -36,21 +41,26 @@ export default {
       return jsonResponse({ error: "Corps de requête JSON invalide." }, 400);
     }
 
+    // --- Recherche d'une photo de plat (feuille "Détail des menus") ---
+    if (params.type === "photo") {
+      return handlePhoto(params, env);
+    }
+
     const nbPersonnes = Number(params.nbPersonnes) || 5;
     const nbSemaines = Math.min(Math.max(Number(params.nbSemaines) || 4, 1), 8);
     const preferences = String(params.preferences || "Aucune restriction");
     const allergies = String(params.allergies || "Aucune");
-    const budget = String(params.budget || "Raisonnable");
+    const budgetMensuel = Math.max(Number(params.budgetMensuel) || 0, 0);
     const tempsPrep = String(params.tempsPrep || "30 min");
     const alimentsAimes = String(params.alimentsAimes || "");
     const alimentsDetestes = String(params.alimentsDetestes || "");
 
     const prompt = construirePrompt({
-      nbPersonnes, nbSemaines, preferences, allergies, budget, tempsPrep,
+      nbPersonnes, nbSemaines, preferences, allergies, budgetMensuel, tempsPrep,
       alimentsAimes, alimentsDetestes,
     });
 
-    const schema = construireSchema(nbSemaines);
+    const schema = construireSchema();
 
     let geminiResponse;
     try {
@@ -110,7 +120,55 @@ function jsonResponse(obj, status) {
   });
 }
 
+// ---------------------------------------------------------------------
+//  Recherche d'une photo libre de droits pour un plat, via l'API
+//  Pexels. On ne renvoie que l'URL publique de l'image (pas besoin de
+//  la clé Pexels pour la télécharger ensuite depuis Excel) : la clé
+//  API reste donc uniquement côté serveur, jamais dans Excel/VBA.
+// ---------------------------------------------------------------------
+async function handlePhoto(params, env) {
+  const query = String(params.query || "").trim().slice(0, 100);
+  if (!query) {
+    return jsonResponse({ error: "Requête de recherche vide." }, 400);
+  }
+  if (!env.PEXELS_API_KEY) {
+    return jsonResponse({ error: "PEXELS_API_KEY n'est pas configurée sur le Worker." }, 500);
+  }
+
+  let pexelsResponse;
+  try {
+    pexelsResponse = await fetch(
+      "https://api.pexels.com/v1/search?query=" + encodeURIComponent(query) +
+        "&per_page=1&orientation=square",
+      { headers: { Authorization: env.PEXELS_API_KEY } }
+    );
+  } catch (e) {
+    return jsonResponse({ error: "Impossible de joindre Pexels : " + e.message }, 502);
+  }
+
+  if (!pexelsResponse.ok) {
+    const detail = await pexelsResponse.text();
+    return jsonResponse(
+      { error: "Pexels a renvoyé une erreur (" + pexelsResponse.status + ") : " + detail.slice(0, 300) },
+      502
+    );
+  }
+
+  const data = await pexelsResponse.json();
+  const photo = data && data.photos && data.photos[0];
+  const url = (photo && photo.src && (photo.src.medium || photo.src.small)) || null;
+
+  return jsonResponse({ url: url }, 200);
+}
+
 function construirePrompt(p) {
+  const consigneBudget = p.budgetMensuel > 0
+    ? `- Budget total pour les courses de tout le mois : environ ${p.budgetMensuel} euros. ` +
+      `Choisis des ingrédients et des quantités raisonnables (privilégie les produits de saison, ` +
+      `les légumineuses, les féculents, et limite les protéines animales les plus chères) pour ` +
+      `rester autant que possible dans ce budget sur l'ensemble du mois.`
+    : `- Budget : non précisé, reste raisonnable.`;
+
   return `Tu es un(e) nutritionniste qui prépare un plan de repas familial pour une maman en France.
 
 Génère un menu complet pour ${p.nbSemaines} semaine(s), pour ${p.nbPersonnes} personne(s).
@@ -118,7 +176,7 @@ Génère un menu complet pour ${p.nbSemaines} semaine(s), pour ${p.nbPersonnes} 
 Contraintes à respecter strictement :
 - Préférences alimentaires : ${p.preferences}
 - Allergies / aliments à éviter absolument : ${p.allergies}
-- Budget : ${p.budget}
+${consigneBudget}
 - Temps de préparation maximum par repas : ${p.tempsPrep}
 - Aliments aimés à privilégier si possible : ${p.alimentsAimes || "(aucune préférence particulière)"}
 - Aliments détestés à éviter si possible : ${p.alimentsDetestes || "(aucun)"}
@@ -133,56 +191,57 @@ nécessaire pour ${p.nbPersonnes} personne(s) (pas par personne), et l'unité (g
 pièce(s), cuillère à soupe, etc.). Les noms d'ingrédients doivent être simples et génériques
 (ex: "carottes", "poulet", "riz"), pas de quantité dans le nom.
 
+Réponds avec un tableau plat "jours" contenant EXACTEMENT ${p.nbSemaines * 7} éléments (un par
+jour), dans cet ordre précis : d'abord les 7 jours de la semaine 1 (Lundi, Mardi, Mercredi,
+Jeudi, Vendredi, Samedi, Dimanche dans cet ordre), puis les 7 jours de la semaine 2, et ainsi
+de suite jusqu'à la semaine ${p.nbSemaines}. Pour chaque élément, indique aussi le numéro de
+semaine (NumeroSemaine, de 1 à ${p.nbSemaines}) et le nom du jour (NomJour).
+
 Réponds uniquement avec les données demandées, dans la langue française, en respectant
 strictement le format demandé.`;
 }
 
-function construireSchema(nbSemaines) {
+function construireSchema() {
   const ingredientSchema = {
-    type: "OBJECT",
+    type: "object",
     properties: {
-      Nom: { type: "STRING" },
-      Quantite: { type: "NUMBER" },
-      Unite: { type: "STRING" },
+      Nom: { type: "string" },
+      Quantite: { type: "number" },
+      Unite: { type: "string" },
     },
     required: ["Nom", "Quantite", "Unite"],
   };
 
   const platSchema = {
-    type: "OBJECT",
+    type: "object",
     properties: {
-      Nom: { type: "STRING" },
-      Ingredients: { type: "ARRAY", items: ingredientSchema },
+      Nom: { type: "string" },
+      Ingredients: { type: "array", items: ingredientSchema },
     },
     required: ["Nom", "Ingredients"],
   };
 
   const jourSchema = {
-    type: "OBJECT",
+    type: "object",
     properties: {
+      NumeroSemaine: { type: "number" },
+      NomJour: { type: "string" },
       PetitDej: platSchema,
       Jus: platSchema,
       Dejeuner: platSchema,
       Diner: platSchema,
     },
-    required: ["PetitDej", "Jus", "Dejeuner", "Diner"],
+    required: ["NumeroSemaine", "NomJour", "PetitDej", "Jus", "Dejeuner", "Diner"],
   };
 
   return {
-    type: "OBJECT",
+    type: "object",
     properties: {
-      semaines: {
-        type: "ARRAY",
-        minItems: nbSemaines,
-        maxItems: nbSemaines,
-        items: {
-          type: "ARRAY",
-          minItems: 7,
-          maxItems: 7,
-          items: jourSchema,
-        },
+      jours: {
+        type: "array",
+        items: jourSchema,
       },
     },
-    required: ["semaines"],
+    required: ["jours"],
   };
 }
